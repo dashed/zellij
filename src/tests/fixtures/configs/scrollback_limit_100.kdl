@@ -1,0 +1,4 @@
+// Configuration file for testing scrollback limit behavior
+// Sets a small scrollback buffer size for fast testing
+
+scroll_buffer_size 100
