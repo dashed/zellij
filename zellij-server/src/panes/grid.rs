@@ -122,6 +122,7 @@ fn transfer_rows_from_lines_above_to_viewport(
     sixel_grid: &mut SixelGrid,
     count: usize,
     max_viewport_width: usize,
+    scrollback_display_lines: &mut usize,
 ) -> usize {
     let mut next_lines: Vec<Row> = vec![];
     let mut lines_added_to_viewport: isize = 0;
@@ -151,7 +152,13 @@ fn transfer_rows_from_lines_above_to_viewport(
     }
     if !next_lines.is_empty() {
         let excess_row = Row::from_rows(next_lines);
-        bounded_push(lines_above, sixel_grid, excess_row);
+        bounded_push(
+            lines_above,
+            sixel_grid,
+            excess_row,
+            scrollback_display_lines,
+            max_viewport_width,
+        );
     }
     match usize::try_from(lines_added_to_viewport) {
         Ok(n) => n,
@@ -165,6 +172,7 @@ fn transfer_rows_from_viewport_to_lines_above(
     sixel_grid: &mut SixelGrid,
     count: usize,
     max_viewport_width: usize,
+    scrollback_display_lines: &mut usize,
 ) -> isize {
     let mut transferred_rows_count: isize = 0;
     let drained_lines = std::cmp::min(count, viewport.len());
@@ -178,7 +186,13 @@ fn transfer_rows_from_viewport_to_lines_above(
             next_lines.append(&mut bottom_canonical_row_and_wraps_in_dst);
         }
         next_lines.push(next_line);
-        let dropped_line_width = bounded_push(lines_above, sixel_grid, Row::from_rows(next_lines));
+        let dropped_line_width = bounded_push(
+            lines_above,
+            sixel_grid,
+            Row::from_rows(next_lines),
+            scrollback_display_lines,
+            max_viewport_width,
+        );
         if let Some(width) = dropped_line_width {
             transferred_rows_count -=
                 calculate_row_display_height(width, max_viewport_width) as isize;
@@ -227,15 +241,53 @@ fn transfer_rows_from_lines_below_to_viewport(
     }
 }
 
-fn bounded_push(vec: &mut VecDeque<Row>, sixel_grid: &mut SixelGrid, value: Row) -> Option<usize> {
+fn bounded_push(
+    vec: &mut VecDeque<Row>,
+    sixel_grid: &mut SixelGrid,
+    value: Row,
+    display_lines_count: &mut usize,
+    viewport_width: usize,
+) -> Option<usize> {
     let mut dropped_line_width = None;
-    if vec.len() >= *SCROLL_BUFFER_SIZE.get().unwrap() {
-        let line = vec.pop_front();
-        if let Some(line) = line {
+    let new_display_lines = calculate_row_display_height(value.width(), viewport_width);
+    let limit = *SCROLL_BUFFER_SIZE.get().unwrap();
+
+    // If the counter is out of sync (buffer is empty but count is high), reset it
+    if vec.is_empty() && *display_lines_count > 0 {
+        *display_lines_count = 0;
+    }
+
+    // If this single line would exceed the entire scrollback limit, cap the count
+    if new_display_lines > limit {
+        // Clear all existing scrollback since this one line is bigger than the limit
+        while let Some(_removed) = vec.pop_front() {
             sixel_grid.offset_grid_top();
-            dropped_line_width = Some(line.width());
+        }
+
+        // Reset display lines count to just this line (capped at limit)
+        *display_lines_count = limit;
+        vec.push_back(value);
+        return None;
+    }
+
+    *display_lines_count += new_display_lines;
+
+    // Remove lines from front until within limit
+    while *display_lines_count > limit && !vec.is_empty() {
+        if let Some(removed) = vec.pop_front() {
+            let removed_display_lines =
+                calculate_row_display_height(removed.width(), viewport_width);
+            *display_lines_count = display_lines_count.saturating_sub(removed_display_lines);
+            sixel_grid.offset_grid_top();
+            dropped_line_width = Some(removed.width());
         }
     }
+
+    // Final safety check: if we still exceed limit and buffer is empty, reset count
+    if *display_lines_count > limit && vec.is_empty() {
+        *display_lines_count = limit;
+    }
+
     vec.push_back(value);
     dropped_line_width
 }
@@ -253,7 +305,7 @@ pub fn create_horizontal_tabstops(columns: usize) -> BTreeSet<usize> {
     horizontal_tabstops
 }
 
-fn calculate_row_display_height(row_width: usize, viewport_width: usize) -> usize {
+pub fn calculate_row_display_height(row_width: usize, viewport_width: usize) -> usize {
     if row_width <= viewport_width {
         return 1;
     }
@@ -348,6 +400,7 @@ pub struct Grid {
     pub link_handler: Rc<RefCell<LinkHandler>>,
     pub ring_bell: bool,
     scrollback_buffer_lines: usize,
+    scrollback_display_lines: usize, // Total display lines in scrollback
     pub mouse_mode: MouseMode,
     pub mouse_tracking: MouseTracking,
     pub focus_event_tracking: bool,
@@ -534,6 +587,7 @@ impl Grid {
             link_handler,
             ring_bell: false,
             scrollback_buffer_lines: 0,
+            scrollback_display_lines: 0,
             mouse_mode: MouseMode::default(),
             mouse_tracking: MouseTracking::default(),
             focus_event_tracking: false,
@@ -598,14 +652,15 @@ impl Grid {
         self.cursor.get_shape()
     }
     pub fn scrollback_position_and_length(&self) -> (usize, usize) {
-        // (position, length)
-        (
-            self.lines_below.len(),
-            (self.scrollback_buffer_lines + self.lines_below.len()),
-        )
+        // (position, length) - return display lines for user-visible counter
+        let position = self.lines_below.len();
+        let total = self.scrollback_display_lines;
+        (position, total)
     }
 
-    fn recalculate_scrollback_buffer_count(&self) -> usize {
+    fn update_scrollback_counts(&mut self) {
+        // Recalculate display lines based on current viewport width
+        // This is needed when viewport size changes (resize operations)
         let mut scrollback_buffer_count = 0;
         for row in &self.lines_above {
             let row_width = row.width();
@@ -616,7 +671,9 @@ impl Grid {
                 scrollback_buffer_count += 1;
             }
         }
-        scrollback_buffer_count
+
+        self.scrollback_buffer_lines = scrollback_buffer_count;
+        self.scrollback_display_lines = scrollback_buffer_count;
     }
 
     fn set_horizontal_tabstop(&mut self) {
@@ -720,6 +777,7 @@ impl Grid {
                 &mut self.sixel_grid,
                 1,
                 self.width,
+                &mut self.scrollback_display_lines,
             );
             self.scrollback_buffer_lines = self
                 .scrollback_buffer_lines
@@ -739,8 +797,10 @@ impl Grid {
         if !self.lines_below.is_empty() && self.viewport.len() == self.height {
             let mut line_to_push_up = self.viewport.remove(0);
 
-            self.scrollback_buffer_lines +=
+            let line_display_height =
                 calculate_row_display_height(line_to_push_up.width(), self.width);
+            self.scrollback_buffer_lines += line_display_height;
+            self.scrollback_display_lines += line_display_height;
 
             let line_to_push_up = if line_to_push_up.is_canonical {
                 line_to_push_up
@@ -758,8 +818,13 @@ impl Grid {
                 }
             };
 
-            let dropped_line_width =
-                bounded_push(&mut self.lines_above, &mut self.sixel_grid, line_to_push_up);
+            let dropped_line_width = bounded_push(
+                &mut self.lines_above,
+                &mut self.sixel_grid,
+                line_to_push_up,
+                &mut self.scrollback_display_lines,
+                self.width,
+            );
             if let Some(width) = dropped_line_width {
                 let dropped_line_height = calculate_row_display_height(width, self.width);
 
@@ -981,6 +1046,7 @@ impl Grid {
                         &mut self.sixel_grid,
                         row_count_to_transfer,
                         new_columns,
+                        &mut self.scrollback_display_lines,
                     );
                     let rows_pulled = self.viewport.len() - current_viewport_row_count;
                     new_cursor_y += rows_pulled;
@@ -1008,6 +1074,7 @@ impl Grid {
                         &mut self.sixel_grid,
                         row_count_to_transfer,
                         new_columns,
+                        &mut self.scrollback_display_lines,
                     );
                 },
                 Ordering::Equal => {},
@@ -1031,7 +1098,7 @@ impl Grid {
         self.height = new_rows;
         self.width = new_columns;
         self.set_scroll_region_to_viewport_size();
-        self.scrollback_buffer_lines = self.recalculate_scrollback_buffer_count();
+        self.update_scrollback_counts();
         self.search_results.selections.clear();
         self.search_viewport();
         // If we have thrown out the active element, set it to None
@@ -1513,7 +1580,7 @@ impl Grid {
     }
     fn clear_lines_above(&mut self) {
         self.lines_above.clear();
-        self.scrollback_buffer_lines = self.recalculate_scrollback_buffer_count();
+        self.update_scrollback_counts();
     }
 
     fn pad_current_line_until(&mut self, position: usize, pad_character: TerminalCharacter) {
@@ -1743,6 +1810,7 @@ impl Grid {
         self.output_buffer.update_all_lines();
         self.changed_colors = None;
         self.scrollback_buffer_lines = 0;
+        self.scrollback_display_lines = 0;
         self.search_results = Default::default();
         self.sixel_scrolling = false;
         self.mouse_mode = MouseMode::NoEncoding;
@@ -2043,6 +2111,7 @@ impl Grid {
             &mut self.sixel_grid,
             count,
             self.width,
+            &mut self.scrollback_display_lines,
         );
 
         self.scrollback_buffer_lines =
@@ -2958,8 +3027,7 @@ impl Perform for Grid {
                                 current_supports_kitty_keyboard_protocol,
                             ));
                             self.clear_viewport_before_rendering = true;
-                            self.scrollback_buffer_lines =
-                                self.recalculate_scrollback_buffer_count();
+                            self.update_scrollback_counts();
                             self.output_buffer.update_all_lines(); // make sure the screen gets cleared in the next render
                         },
                         1 => {
