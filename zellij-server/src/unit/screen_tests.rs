@@ -4164,3 +4164,108 @@ pub fn send_cli_change_floating_pane_coordinates_action() {
     }
     assert_snapshot!(format!("{}", snapshot_count));
 }
+
+#[test]
+pub fn rename_tab_uses_position_not_id_after_close() {
+    // This test verifies the fix for renaming tabs by position after closing a tab.
+    // Bug: RenameTab was using the position parameter as a hashmap key (tab ID),
+    // which failed when tab IDs didn't match positions after tab closures.
+    // Fix: RenameTab now searches tabs by their position field instead.
+    //
+    // Scenario:
+    // 1. Create 3 tabs: ID=0/pos=0, ID=1/pos=1, ID=2/pos=2
+    // 2. Close tab at position 0 (ID=0)
+    // 3. After close: ID=1/pos=0, ID=2/pos=1
+    // 4. RenameTab(2, "NewName") should rename tab at position 1 (0-indexed),
+    //    which is the tab with ID=2 (originally "Tab #3")
+    // 5. Old bug: would look for tabs[1], finding ID=1 tab (wrong!)
+    // 6. Fix: searches for tab with position=1, finding ID=2 tab (correct!)
+
+    let size = Size { cols: 80, rows: 10 };
+    let client_id = 10;
+    let mut mock_screen = MockScreen::new(size);
+    let session_metadata = mock_screen.clone_session_metadata();
+
+    // Start screen thread with first tab
+    let screen_thread = mock_screen.run(None, vec![]);
+
+    // Create additional tabs (tab 2 and tab 3)
+    mock_screen.new_tab(TiledPaneLayout::default());
+    mock_screen.new_tab(TiledPaneLayout::default());
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Collect plugin instructions to verify tab names
+    let received_plugin_instructions = Arc::new(Mutex::new(vec![]));
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let plugin_thread = log_actions_in_thread!(
+        received_plugin_instructions,
+        PluginInstruction::Exit,
+        plugin_receiver
+    );
+
+    // Switch to first tab (position 0) and close it
+    let go_to_first_tab = CliAction::GoToTab { index: 1 };
+    send_cli_action_to_server(&session_metadata, go_to_first_tab, client_id);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let close_tab = CliAction::CloseTab;
+    send_cli_action_to_server(&session_metadata, close_tab, client_id);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Now we should have 2 tabs with positions 0 and 1
+    // but their original IDs were 1 and 2
+
+    // Rename the tab at position 2 (1-indexed), which is position 1 (0-indexed)
+    // This should rename the tab that was originally "Tab #3"
+    // Send RenameTab instruction directly since CliAction::RenameTab renames active tab
+    let _ = mock_screen.to_screen.send(ScreenInstruction::RenameTab(
+        2, // 1-indexed position
+        "RenamedByPosition".as_bytes().to_vec(),
+        None,
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    mock_screen.teardown(vec![plugin_thread, screen_thread]);
+
+    // Find the TabUpdate events to verify tab names
+    let tab_updates: Vec<_> = received_plugin_instructions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|instruction| match instruction {
+            PluginInstruction::Update(updates) => updates.iter().find_map(|u| match u {
+                (_, _, Event::TabUpdate(tabs)) => Some(tabs.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+
+    // Get the last TabUpdate to verify final state
+    let final_tab_update = tab_updates
+        .last()
+        .expect("Expected at least one TabUpdate event");
+
+    // Find the tab at position 1 (0-indexed) and verify it was renamed
+    let tab_at_position_1 = final_tab_update
+        .iter()
+        .find(|tab| tab.position == 1)
+        .expect("Expected to find tab at position 1");
+
+    assert_eq!(
+        tab_at_position_1.name, "RenamedByPosition",
+        "Tab at position 1 should have been renamed by position, not by ID"
+    );
+
+    // Verify the tab at position 0 was NOT renamed (it should keep its original name)
+    let tab_at_position_0 = final_tab_update
+        .iter()
+        .find(|tab| tab.position == 0)
+        .expect("Expected to find tab at position 0");
+
+    assert!(
+        tab_at_position_0.name != "RenamedByPosition",
+        "Tab at position 0 should NOT have been renamed"
+    );
+}

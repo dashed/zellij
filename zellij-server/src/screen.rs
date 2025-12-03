@@ -5589,17 +5589,22 @@ pub(crate) fn screen_thread_main(
                 screen.log_and_report_session_state()?;
             },
             ScreenInstruction::RenameTab(
-                tab_index,
+                tab_position,
                 new_name,
                 _completion_tx, // the action ends here, dropping this will release anything
                                 // waiting for it
             ) => {
-                match screen.tabs.get_mut(&tab_index.saturating_sub(1)) {
+                let search_position = tab_position.saturating_sub(1);
+                match screen
+                    .tabs
+                    .values_mut()
+                    .find(|t| t.position == search_position)
+                {
                     Some(tab) => {
                         tab.name = String::from_utf8_lossy(&new_name).to_string();
                     },
                     None => {
-                        log::error!("Failed to find tab with index: {:?}", tab_index);
+                        log::error!("Failed to find tab with position: {:?}", tab_position);
                     },
                 }
                 screen.log_and_report_session_state()?;
