@@ -186,9 +186,10 @@ fn main() {
         no_formatting,
         short,
         reverse,
+        progressive,
     })) = opts.command
     {
-        commands::list_sessions(no_formatting, short, reverse);
+        commands::list_sessions(no_formatting, short, reverse, progressive);
     } else if let Some(Command::Sessions(Sessions::ListAliases)) = opts.command {
         commands::list_aliases(opts);
     } else if let Some(Command::Sessions(Sessions::Watch { ref session_name })) = opts.command {

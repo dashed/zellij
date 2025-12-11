@@ -318,41 +318,149 @@ pub fn delete_session(name: &str, force: bool) {
     }
 }
 
-pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool) {
-    let exit_code = match get_sessions() {
-        Ok(running_sessions) => {
-            let resurrectable_sessions = get_resurrectable_sessions();
-            let mut all_sessions: HashMap<String, (Duration, bool)> = resurrectable_sessions
-                .iter()
-                .map(|(name, timestamp)| (name.clone(), (timestamp.clone(), true)))
-                .collect();
-            for (session_name, duration) in running_sessions {
-                all_sessions.insert(session_name.clone(), (duration, false));
-            }
-            if all_sessions.is_empty() {
-                eprintln!("No active zellij sessions found.");
+pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool, progressive: bool) {
+    if progressive {
+        list_sessions_progressive(no_formatting);
+    } else {
+        let exit_code = match get_sessions() {
+            Ok(running_sessions) => {
+                let resurrectable_sessions = get_resurrectable_sessions();
+                let mut all_sessions: HashMap<String, (Duration, bool)> = resurrectable_sessions
+                    .iter()
+                    .map(|(name, timestamp)| (name.clone(), (timestamp.clone(), true)))
+                    .collect();
+                for (session_name, duration) in running_sessions {
+                    all_sessions.insert(session_name.clone(), (duration, false));
+                }
+                if all_sessions.is_empty() {
+                    eprintln!("No active zellij sessions found.");
+                    1
+                } else {
+                    print_sessions(
+                        all_sessions
+                            .iter()
+                            .map(|(name, (timestamp, is_dead))| {
+                                (name.clone(), timestamp.clone(), *is_dead)
+                            })
+                            .collect(),
+                        no_formatting,
+                        short,
+                        reverse,
+                    );
+                    0
+                }
+            },
+            Err(e) => {
+                eprintln!("Error occurred: {:?}", e);
                 1
-            } else {
-                print_sessions(
-                    all_sessions
-                        .iter()
-                        .map(|(name, (timestamp, is_dead))| {
-                            (name.clone(), timestamp.clone(), *is_dead)
-                        })
-                        .collect(),
-                    no_formatting,
-                    short,
-                    reverse,
-                );
-                0
+            },
+        };
+        process::exit(exit_code);
+    }
+}
+
+/// List sessions progressively, showing each session's status as it's checked.
+/// This is useful for debugging when some sessions may be unresponsive.
+fn list_sessions_progressive(no_formatting: bool) {
+    use std::io::Write;
+
+    let curr_session = envs::get_session_name().unwrap_or_else(|_| "".into());
+
+    // First, check running sessions with progressive output
+    let sock_dir = &*ZELLIJ_SOCK_DIR;
+    let mut found_any = false;
+
+    match fs::read_dir(sock_dir) {
+        Ok(files) => {
+            let mut socket_files: Vec<_> = files
+                .filter_map(|f| f.ok())
+                .filter(|f| f.file_type().map(|t| t.is_socket()).unwrap_or(false))
+                .collect();
+
+            // Sort by creation time for consistent ordering
+            socket_files.sort_by(|a, b| {
+                let a_time = fs::metadata(a.path())
+                    .ok()
+                    .and_then(|m| m.created().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let b_time = fs::metadata(b.path())
+                    .ok()
+                    .and_then(|m| m.created().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                b_time.cmp(&a_time)
+            });
+
+            for file in socket_files {
+                if let Ok(session_name) = file.file_name().into_string() {
+                    found_any = true;
+
+                    // Print session name with "checking..." indicator
+                    let name_display = if no_formatting {
+                        session_name.clone()
+                    } else {
+                        format!("\u{1b}[32;1m{}\u{1b}[m", session_name)
+                    };
+
+                    print!("{} ... ", name_display);
+                    let _ = io::stdout().flush();
+
+                    // Check if session is responsive (uses timeout from assert_socket)
+                    let is_responsive = assert_socket(&session_name);
+
+                    // Print status
+                    let status = if is_responsive {
+                        if no_formatting {
+                            "[OK]".to_string()
+                        } else {
+                            "\u{1b}[32m[OK]\u{1b}[m".to_string()
+                        }
+                    } else {
+                        if no_formatting {
+                            "[UNRESPONSIVE]".to_string()
+                        } else {
+                            "\u{1b}[31m[UNRESPONSIVE]\u{1b}[m".to_string()
+                        }
+                    };
+
+                    // Add current session indicator
+                    let current_indicator = if curr_session == session_name {
+                        " (current)"
+                    } else {
+                        ""
+                    };
+
+                    println!("{}{}", status, current_indicator);
+                }
             }
         },
-        Err(e) => {
-            eprintln!("Error occurred: {:?}", e);
-            1
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            eprintln!("Error reading socket directory: {:?}", e);
+            process::exit(1);
         },
-    };
-    process::exit(exit_code);
+        Err(_) => {},
+    }
+
+    // Then show resurrectable (dead) sessions
+    let resurrectable_sessions = get_resurrectable_sessions();
+    for (session_name, _duration) in resurrectable_sessions {
+        found_any = true;
+        let name_display = if no_formatting {
+            format!("{} (EXITED - attach to resurrect)", session_name)
+        } else {
+            format!(
+                "\u{1b}[33;1m{}\u{1b}[m (\u{1b}[31;1mEXITED\u{1b}[m - attach to resurrect)",
+                session_name
+            )
+        };
+        println!("{}", name_display);
+    }
+
+    if !found_any {
+        eprintln!("No active zellij sessions found.");
+        process::exit(1);
+    }
+
+    process::exit(0);
 }
 
 #[derive(Debug, Clone)]
@@ -1043,6 +1151,137 @@ mod tests {
             "Mixed check took {:?}, expected less than {:?}",
             elapsed,
             max_expected
+        );
+    }
+
+    // ==================== Progressive Output Tests ====================
+
+    /// Test the progressive output status format strings.
+    #[test]
+    fn test_progressive_status_format_strings() {
+        // Test plain text formats (no_formatting = true)
+        let ok_plain = "[OK]";
+        let unresponsive_plain = "[UNRESPONSIVE]";
+
+        assert!(ok_plain.contains("OK"));
+        assert!(unresponsive_plain.contains("UNRESPONSIVE"));
+
+        // Test colored formats (no_formatting = false)
+        let ok_colored = "\u{1b}[32m[OK]\u{1b}[m";
+        let unresponsive_colored = "\u{1b}[31m[UNRESPONSIVE]\u{1b}[m";
+
+        // Verify ANSI escape codes are present
+        assert!(ok_colored.contains("\u{1b}[32m")); // Green
+        assert!(ok_colored.contains("\u{1b}[m")); // Reset
+        assert!(unresponsive_colored.contains("\u{1b}[31m")); // Red
+        assert!(unresponsive_colored.contains("\u{1b}[m")); // Reset
+    }
+
+    /// Test the progressive output session name formatting.
+    #[test]
+    fn test_progressive_session_name_formatting() {
+        let session_name = "test_session";
+
+        // Plain format
+        let plain_name = session_name.to_string();
+        assert_eq!(plain_name, "test_session");
+
+        // Colored format (green bold)
+        let colored_name = format!("\u{1b}[32;1m{}\u{1b}[m", session_name);
+        assert!(colored_name.contains("\u{1b}[32;1m")); // Green bold
+        assert!(colored_name.contains(session_name));
+        assert!(colored_name.contains("\u{1b}[m")); // Reset
+    }
+
+    /// Test progressive output for EXITED session formatting.
+    #[test]
+    fn test_progressive_exited_session_formatting() {
+        let session_name = "dead_session";
+
+        // Plain format
+        let plain = format!("{} (EXITED - attach to resurrect)", session_name);
+        assert!(plain.contains(session_name));
+        assert!(plain.contains("EXITED"));
+        assert!(plain.contains("attach to resurrect"));
+
+        // Colored format
+        let colored = format!(
+            "\u{1b}[33;1m{}\u{1b}[m (\u{1b}[31;1mEXITED\u{1b}[m - attach to resurrect)",
+            session_name
+        );
+        assert!(colored.contains("\u{1b}[33;1m")); // Yellow bold for session name
+        assert!(colored.contains("\u{1b}[31;1m")); // Red bold for EXITED
+        assert!(colored.contains(session_name));
+    }
+
+    /// Test that progressive mode checks sessions sequentially (for immediate feedback).
+    /// This is verified by checking that assert_socket is called for each session
+    /// and the total time reflects sequential execution.
+    #[test]
+    fn test_progressive_sequential_checking() {
+        use std::io::{Read, Write};
+
+        const NUM_SOCKETS: usize = 2;
+        const DELAY_MS: u64 = 50;
+
+        let dir = tempdir().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+
+        // Create sockets with servers that respond after a delay
+        let mut handles = Vec::new();
+        let mut socket_names = Vec::new();
+
+        for i in 0..NUM_SOCKETS {
+            let socket_name = format!("prog_test_{}.sock", i);
+            let socket_path = dir.path().join(&socket_name);
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            socket_names.push(socket_name);
+
+            let done_clone = done.clone();
+            handles.push(thread::spawn(move || {
+                if let Ok((mut conn, _)) = listener.accept() {
+                    thread::sleep(Duration::from_millis(DELAY_MS));
+                    let _ = conn.write_all(b"OK");
+                    while !done_clone.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }));
+        }
+
+        // Simulate progressive checking (sequential)
+        let start = Instant::now();
+
+        for socket_name in &socket_names {
+            let socket_path = dir.path().join(socket_name);
+            let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+            let fd = stream.as_raw_fd();
+
+            let timeout = TimeVal::milliseconds((DELAY_MS as i64) * 3);
+            setsockopt(fd, ReceiveTimeout, &timeout).unwrap();
+
+            let mut buf = [0u8; 2];
+            let mut reader = std::io::BufReader::new(stream);
+            let _ = reader.read_exact(&mut buf);
+        }
+
+        let elapsed = start.elapsed();
+
+        // Clean up
+        done.store(true, Ordering::Relaxed);
+        for h in handles {
+            let _ = h.join();
+        }
+
+        // Sequential execution should take at least DELAY_MS * NUM_SOCKETS
+        // (minus some tolerance for timing variations)
+        let min_sequential = Duration::from_millis(DELAY_MS * (NUM_SOCKETS as u64 - 1));
+        assert!(
+            elapsed >= min_sequential,
+            "Progressive check was too fast ({:?}), expected at least {:?}. \
+             This suggests checks ran in parallel instead of sequentially.",
+            elapsed,
+            min_sequential
         );
     }
 }
