@@ -49,7 +49,7 @@ impl SessionListing {
             SessionListing::Active => zellij_utils::sessions::get_sessions()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(name, _)| name)
+                .map(|(name, _, _)| name)
                 .collect(),
             SessionListing::Indexed(sessions) | SessionListing::Named(sessions) => sessions.clone(),
         }

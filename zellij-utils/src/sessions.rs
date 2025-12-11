@@ -12,6 +12,7 @@ use crate::{
 use anyhow;
 use humantime::format_duration;
 use std::collections::{BTreeMap, HashMap};
+use std::os::unix::io::{AsFd, AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
@@ -94,7 +95,51 @@ fn session_name(names_by_id: &HashMap<String, String>, id: String) -> String {
     names_by_id.get(&id).cloned().unwrap_or(id)
 }
 
-pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
+/// Get the PID of the peer process connected to a Unix socket.
+/// Uses platform-specific socket options: SO_PEERCRED on Linux, LOCAL_PEERPID on macOS.
+#[cfg(target_os = "linux")]
+fn get_peer_pid(fd: RawFd) -> Option<u32> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    getsockopt(fd, PeerCredentials)
+        .ok()
+        .map(|creds| creds.pid() as u32)
+}
+
+#[cfg(target_os = "macos")]
+fn get_peer_pid(fd: RawFd) -> Option<u32> {
+    // macOS uses LOCAL_PEERPID to get the peer's PID
+    use nix::libc;
+    use std::mem;
+    const SOL_LOCAL: libc::c_int = 0;
+    const LOCAL_PEERPID: libc::c_int = 2;
+
+    let mut pid: libc::pid_t = 0;
+    let mut len: libc::socklen_t = mem::size_of::<libc::pid_t>() as libc::socklen_t;
+
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            &mut pid as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+
+    if result == 0 && pid > 0 {
+        Some(pid as u32)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn get_peer_pid(_fd: RawFd) -> Option<u32> {
+    // PID retrieval not supported on this platform
+    None
+}
+
+pub fn get_sessions() -> Result<Vec<(String, Duration, Option<u32>)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
         Ok(files) => {
             let names_by_id = session_index::session_names_by_id();
@@ -134,8 +179,9 @@ pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
                                 .unwrap_or_default();
                             let duration = Duration::from_secs(ctime.as_secs());
 
-                            if assert_socket(&file_name) {
-                                Some((session_name(names_by_id, file_name), duration))
+                            let (is_alive, pid) = assert_socket(&file_name);
+                            if is_alive {
+                                Some((session_name(names_by_id, file_name), duration, pid))
                             } else {
                                 None
                             }
@@ -251,7 +297,7 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
                 let file_modified_at = file.metadata()?.modified()?;
                 if !crate::consts::is_app_socket_name(&file_name)
                     && is_ipc_socket(&file.file_type()?)
-                    && assert_socket(&file_name)
+                    && assert_socket(&file_name).0
                 {
                     sessions_with_mtime
                         .push((session_name(&names_by_id, file_name), file_modified_at));
@@ -267,12 +313,13 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
     }
 }
 
-/// Probe a session socket to check if a server is alive.
+/// Check if a session socket is alive and return its server PID if available.
+/// Returns (is_alive, Option<pid>).
 ///
 /// On Unix, connects and sends a `ConnStatus` message to verify the server responds.
 /// On Windows, reads the server PID from the marker file and checks process liveness.
 #[cfg(unix)]
-fn assert_socket(name: &str) -> bool {
+fn assert_socket(name: &str) -> (bool, Option<u32>) {
     use crate::consts::ipc_connect;
     let path = &*ZELLIJ_SOCK_DIR.join(name);
     match ipc_connect(path) {
@@ -283,27 +330,34 @@ fn assert_socket(name: &str) -> bool {
                 use interprocess::local_socket::prelude::*;
                 let _ = stream.set_recv_timeout(Some(std::time::Duration::from_secs(5)));
             }
+
+            // Get the server's PID from the socket connection.
+            // Extract the raw fd from the interprocess Stream enum.
+            let pid = match &stream {
+                interprocess::local_socket::Stream::UdSocket(s) => get_peer_pid(s.as_fd().as_raw_fd()),
+            };
+
             let mut sender: IpcSenderWithContext<ClientToServerMsg> =
                 IpcSenderWithContext::new(stream);
             let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
             let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
             match receiver.recv_server_msg() {
-                Some((ServerToClientMsg::Connected, _)) => true,
-                None | Some((_, _)) => false,
+                Some((ServerToClientMsg::Connected, _)) => (true, pid),
+                None | Some((_, _)) => (false, None),
             }
         },
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
             drop(fs::remove_file(path));
-            false
+            (false, None)
         },
-        Err(_) => false,
+        Err(_) => (false, None),
     }
 }
 
 /// On Windows, reads the server PID from the marker file and checks whether
 /// the process is still alive via `OpenProcess`. Cleans up stale marker files.
 #[cfg(windows)]
-fn assert_socket(name: &str) -> bool {
+fn assert_socket(name: &str) -> (bool, Option<u32>) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
@@ -312,7 +366,7 @@ fn assert_socket(name: &str) -> bool {
         Ok(s) => s,
         Err(_) => {
             drop(fs::remove_file(path));
-            return false;
+            return (false, None);
         },
     };
     let pid: u32 = match pid_str.trim().parse() {
@@ -321,7 +375,7 @@ fn assert_socket(name: &str) -> bool {
             // Marker file exists but has no valid PID (e.g. empty from old version).
             // Treat as stale.
             drop(fs::remove_file(path));
-            return false;
+            return (false, None);
         },
     };
     let alive = unsafe {
@@ -335,8 +389,10 @@ fn assert_socket(name: &str) -> bool {
     };
     if !alive {
         drop(fs::remove_file(path));
+        (false, None)
+    } else {
+        (true, Some(pid))
     }
-    alive
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -345,12 +401,12 @@ fn assert_socket(_name: &str) -> bool {
 }
 
 pub fn print_sessions(
-    mut sessions: Vec<(String, Duration, bool)>,
+    mut sessions: Vec<(String, Duration, bool, Option<u32>)>,
     no_formatting: bool,
     short: bool,
     reverse: bool,
 ) {
-    // (session_name, timestamp, is_dead)
+    // (session_name, timestamp, is_dead, pid)
     let curr_session = envs::get_session_name().unwrap_or_else(|_| "".into());
     sessions.sort_by(|a, b| {
         if reverse {
@@ -362,11 +418,12 @@ pub fn print_sessions(
     });
     sessions
         .iter()
-        .for_each(|(session_name, timestamp, is_dead)| {
+        .for_each(|(session_name, timestamp, is_dead, pid)| {
             if short {
                 println!("{}", session_name);
                 return;
             }
+            let pid_str = pid.map(|p| format!("[{}]", p)).unwrap_or_default();
             if no_formatting {
                 let suffix = if curr_session == *session_name {
                     format!("(current)")
@@ -376,9 +433,18 @@ pub fn print_sessions(
                     String::new()
                 };
                 let timestamp = format!("[Created {} ago]", format_duration(*timestamp));
-                println!("{} {} {}", session_name, timestamp, suffix);
+                if pid_str.is_empty() {
+                    println!("{} {} {}", session_name, timestamp, suffix);
+                } else {
+                    println!("{} {} {} {}", session_name, pid_str, timestamp, suffix);
+                }
             } else {
                 let formatted_session_name = format!("\u{1b}[32;1m{}\u{1b}[m", session_name);
+                let formatted_pid = if let Some(p) = pid {
+                    format!("[\u{1b}[36m{}\u{1b}[m]", p) // Cyan for PID
+                } else {
+                    String::new()
+                };
                 let suffix = if curr_session == *session_name {
                     format!("(current)")
                 } else if *is_dead {
@@ -390,7 +456,14 @@ pub fn print_sessions(
                     "[Created \u{1b}[35;1m{}\u{1b}[m ago]",
                     format_duration(*timestamp)
                 );
-                println!("{} {} {}", formatted_session_name, timestamp, suffix);
+                if formatted_pid.is_empty() {
+                    println!("{} {} {}", formatted_session_name, timestamp, suffix);
+                } else {
+                    println!(
+                        "{} {} {} {}",
+                        formatted_session_name, formatted_pid, timestamp, suffix
+                    );
+                }
             }
         })
 }
@@ -495,12 +568,14 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool, progressiv
         let exit_code = match get_sessions() {
             Ok(running_sessions) => {
                 let resurrectable_sessions = get_resurrectable_sessions();
-                let mut all_sessions: HashMap<String, (Duration, bool)> = resurrectable_sessions
-                    .iter()
-                    .map(|(name, timestamp)| (name.clone(), (timestamp.clone(), true)))
-                    .collect();
-                for (session_name, duration) in running_sessions {
-                    all_sessions.insert(session_name.clone(), (duration, false));
+                // (Duration, is_dead, Option<pid>)
+                let mut all_sessions: HashMap<String, (Duration, bool, Option<u32>)> =
+                    resurrectable_sessions
+                        .iter()
+                        .map(|(name, timestamp)| (name.clone(), (timestamp.clone(), true, None)))
+                        .collect();
+                for (session_name, duration, pid) in running_sessions {
+                    all_sessions.insert(session_name.clone(), (duration, false, pid));
                 }
                 if all_sessions.is_empty() {
                     eprintln!("No active zellij sessions found.");
@@ -509,8 +584,8 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool, progressiv
                     print_sessions(
                         all_sessions
                             .iter()
-                            .map(|(name, (timestamp, is_dead))| {
-                                (name.clone(), timestamp.clone(), *is_dead)
+                            .map(|(name, (timestamp, is_dead, pid))| {
+                                (name.clone(), timestamp.clone(), *is_dead, *pid)
                             })
                             .collect(),
                         no_formatting,
@@ -581,7 +656,18 @@ fn list_sessions_progressive(no_formatting: bool) {
                     let _ = io::stdout().flush();
 
                     // Check if session is responsive (uses timeout from assert_socket)
-                    let is_responsive = assert_socket(&socket_id);
+                    let (is_responsive, pid) = assert_socket(&socket_id);
+
+                    // Format PID display
+                    let pid_display = if let Some(p) = pid {
+                        if no_formatting {
+                            format!("[{}] ", p)
+                        } else {
+                            format!("[\u{1b}[36m{}\u{1b}[m] ", p) // Cyan for PID
+                        }
+                    } else {
+                        String::new()
+                    };
 
                     // Print status
                     let status = if is_responsive {
@@ -605,7 +691,7 @@ fn list_sessions_progressive(no_formatting: bool) {
                         ""
                     };
 
-                    println!("{}{}", status, current_indicator);
+                    println!("{}{}{}", pid_display, status, current_indicator);
                 }
             }
         },
@@ -1615,5 +1701,122 @@ mod tests {
             elapsed,
             min_sequential
         );
+    }
+
+    /// Test PID formatting strings for session display.
+    #[test]
+    fn test_pid_format_strings() {
+        let pid: u32 = 12345;
+
+        // Plain format (no ANSI codes)
+        let plain_pid = format!("[{}]", pid);
+        assert_eq!(plain_pid, "[12345]");
+
+        // Colored format (cyan for PID)
+        let colored_pid = format!("[\u{1b}[36m{}\u{1b}[m]", pid);
+        assert!(colored_pid.contains("\u{1b}[36m")); // Cyan color code
+        assert!(colored_pid.contains("12345"));
+        assert!(colored_pid.contains("\u{1b}[m")); // Reset code
+    }
+
+    /// Test session display with PID included.
+    #[test]
+    fn test_session_display_with_pid() {
+        let session_name = "test_session";
+        let pid: u32 = 54321;
+
+        // Format as it would appear in list_sessions
+        let formatted_session = format!("\u{1b}[32;1m{}\u{1b}[m", session_name);
+        let formatted_pid = format!("[\u{1b}[36m{}\u{1b}[m]", pid);
+        let timestamp = "[Created 1h ago]";
+
+        let full_output = format!("{} {} {}", formatted_session, formatted_pid, timestamp);
+
+        assert!(full_output.contains(session_name));
+        assert!(full_output.contains("54321"));
+        assert!(full_output.contains("Created"));
+    }
+
+    /// Test session display without PID (None case).
+    #[test]
+    fn test_session_display_without_pid() {
+        let session_name = "test_session";
+        let pid: Option<u32> = None;
+
+        let pid_display = pid.map(|p| format!("[{}]", p)).unwrap_or_default();
+        assert_eq!(pid_display, "");
+
+        // When PID is None, output should not contain brackets for PID
+        let formatted_session = format!("\u{1b}[32;1m{}\u{1b}[m", session_name);
+        let timestamp = "[Created 1h ago]";
+
+        let full_output = if pid_display.is_empty() {
+            format!("{} {}", formatted_session, timestamp)
+        } else {
+            format!("{} {} {}", formatted_session, pid_display, timestamp)
+        };
+
+        assert!(full_output.contains(session_name));
+        assert!(full_output.contains("Created"));
+        // Should not have extra brackets for missing PID
+        assert!(!full_output.contains("[]"));
+    }
+
+    /// Test progressive mode PID display format.
+    #[test]
+    fn test_progressive_pid_display() {
+        let pid: u32 = 99999;
+
+        // Plain format
+        let plain = format!("[{}] ", pid);
+        assert_eq!(plain, "[99999] ");
+
+        // Colored format
+        let colored = format!("[\u{1b}[36m{}\u{1b}[m] ", pid);
+        assert!(colored.contains("\u{1b}[36m")); // Cyan
+        assert!(colored.contains("99999"));
+        assert!(colored.ends_with("] "));
+    }
+
+    /// Test that assert_socket returns a tuple (bool, Option<u32>).
+    #[test]
+    fn test_assert_socket_returns_tuple() {
+        use std::io::Write;
+
+        let dir = tempdir().unwrap();
+        let socket_name = "pid_test.sock";
+        let socket_path = dir.path().join(socket_name);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+
+        // Server that accepts and responds
+        let handle = thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                let _ = conn.write_all(b"OK");
+                while !done_clone.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        });
+
+        thread::sleep(Duration::from_millis(50));
+
+        // Connect and get peer PID
+        let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+        let fd = stream.as_raw_fd();
+        let pid = super::get_peer_pid(fd);
+
+        // On supported platforms (Linux, macOS), PID should be Some
+        // On other platforms, it may be None
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert!(pid.is_some(), "Expected PID on Linux/macOS");
+            assert!(pid.unwrap() > 0, "PID should be positive");
+        }
+
+        done.store(true, Ordering::Relaxed);
+        let _ = handle.join();
     }
 }

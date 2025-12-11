@@ -8267,7 +8267,7 @@ impl Screen {
             &BTreeMap::new(),
         );
         let running_session_exists = zellij_utils::sessions::get_sessions()
-            .map(|sessions| sessions.iter().any(|(session, _)| session == &name))
+            .map(|sessions| sessions.iter().any(|(session, _, _)| session == &name))
             .unwrap_or(false);
         if self.peer_sessions_cache.contains_key(&name) || running_session_exists {
             return Ok(Err("A session by this name already exists.".to_owned()));
