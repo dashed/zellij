@@ -35,7 +35,7 @@ impl SessionListing {
             SessionListing::Named(sessions) => print_sessions(
                 sessions
                     .iter()
-                    .map(|name| (name.clone(), Duration::default(), false))
+                    .map(|name| (name.clone(), Duration::default(), false, None))
                     .collect(),
                 false,
                 false,
