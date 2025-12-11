@@ -10,11 +10,18 @@ use crate::{
 use anyhow;
 use humantime::format_duration;
 use interprocess::local_socket::LocalSocketStream;
+use nix::sys::socket::{setsockopt, sockopt::ReceiveTimeout};
+use nix::sys::time::{TimeVal, TimeValLike};
 use std::collections::HashMap;
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::io::AsRawFd;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
 use suggest::Suggest;
+
+/// Timeout in seconds for socket reads when checking session connectivity.
+/// This prevents `zellij ls` from hanging indefinitely on unresponsive sessions.
+const SOCKET_ASSERT_TIMEOUT_SECS: i64 = 2;
 
 pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
@@ -141,6 +148,18 @@ fn assert_socket(name: &str) -> bool {
     let path = &*ZELLIJ_SOCK_DIR.join(name);
     match LocalSocketStream::connect(path) {
         Ok(stream) => {
+            // Set read timeout to prevent blocking forever on unresponsive sessions.
+            // This is critical for `zellij ls` to not hang when a session is stuck.
+            let fd = stream.as_raw_fd();
+            let timeout = TimeVal::seconds(SOCKET_ASSERT_TIMEOUT_SECS);
+            if let Err(e) = setsockopt(fd, ReceiveTimeout, &timeout) {
+                log::warn!(
+                    "Failed to set socket timeout for session '{}': {}",
+                    name,
+                    e
+                );
+            }
+
             let mut sender: IpcSenderWithContext<ClientToServerMsg> =
                 IpcSenderWithContext::new(stream);
             let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
@@ -628,3 +647,117 @@ const NOUNS: &[&'static str] = &[
     "yak",
     "zebra",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::socket::{getsockopt, sockopt::ReceiveTimeout};
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Instant;
+    use tempfile::tempdir;
+
+    /// Test that SOCKET_ASSERT_TIMEOUT_SECS is set to a reasonable value.
+    /// 2 seconds is long enough for healthy sessions to respond but short enough
+    /// to detect unresponsive sessions quickly during `zellij ls`.
+    #[test]
+    fn test_socket_timeout_constant_is_reasonable() {
+        // Timeout should be at least 1 second to allow for slow responses
+        assert!(
+            SOCKET_ASSERT_TIMEOUT_SECS >= 1,
+            "Timeout too short for normal operation"
+        );
+        // Timeout should be at most 5 seconds to ensure quick hang detection
+        assert!(
+            SOCKET_ASSERT_TIMEOUT_SECS <= 5,
+            "Timeout too long for hang detection"
+        );
+    }
+
+    /// Test that the socket timeout is correctly applied to the file descriptor.
+    #[test]
+    fn test_socket_timeout_is_set_correctly() {
+        // Create a temporary Unix socket
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+
+        // Connect to the socket
+        let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+        let fd = stream.as_raw_fd();
+
+        // Set the timeout
+        let timeout = TimeVal::seconds(SOCKET_ASSERT_TIMEOUT_SECS);
+        setsockopt(fd, ReceiveTimeout, &timeout).unwrap();
+
+        // Verify the timeout was set
+        let actual_timeout = getsockopt(fd, ReceiveTimeout).unwrap();
+        assert_eq!(actual_timeout.tv_sec(), SOCKET_ASSERT_TIMEOUT_SECS);
+    }
+
+    /// Test that socket read actually times out when server doesn't respond.
+    /// This is an integration test that verifies the timeout mechanism works end-to-end.
+    #[test]
+    fn test_socket_read_times_out_on_unresponsive_server() {
+        use std::io::Read;
+
+        // Create a temporary Unix socket
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("timeout_test.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        // Flag to signal when test is done
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+
+        // Spawn a thread that accepts the connection but never responds
+        let handle = thread::spawn(move || {
+            // Accept connection but don't send anything
+            let _conn = listener.accept();
+            // Keep connection open until test is done
+            while !done_clone.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        // Connect and set timeout
+        let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+        let fd = stream.as_raw_fd();
+
+        // Set a short timeout for the test (100ms)
+        let test_timeout = TimeVal::milliseconds(100);
+        setsockopt(fd, ReceiveTimeout, &test_timeout).unwrap();
+
+        // Try to read - this should timeout
+        let mut buf = [0u8; 1];
+        let start = Instant::now();
+        let mut reader = std::io::BufReader::new(stream);
+        let result = reader.read(&mut buf);
+        let elapsed = start.elapsed();
+
+        // Signal test is done
+        done.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        // Verify that:
+        // 1. Read returned an error (timed out)
+        // 2. The elapsed time is reasonable (within 50% of timeout)
+        assert!(
+            result.is_err(),
+            "Read should have timed out but returned: {:?}",
+            result
+        );
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "Timeout happened too quickly: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Timeout took too long: {:?}",
+            elapsed
+        );
+    }
+}
