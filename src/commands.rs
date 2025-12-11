@@ -644,7 +644,7 @@ fn attach_with_session_name(
                 print_sessions(
                     sessions
                         .iter()
-                        .map(|s| (s.clone(), Duration::default(), false))
+                        .map(|s| (s.clone(), Duration::default(), false, None))
                         .collect(),
                     false,
                     false,
@@ -1033,7 +1033,7 @@ pub(crate) fn watch_session(session_name: Option<String>, opts: CliArgs) {
                 print_sessions(
                     sessions
                         .iter()
-                        .map(|s| (s.clone(), Duration::default(), false))
+                        .map(|s| (s.clone(), Duration::default(), false, None))
                         .collect(),
                     false,
                     false,
