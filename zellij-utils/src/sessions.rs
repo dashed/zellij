@@ -26,21 +26,46 @@ const SOCKET_ASSERT_TIMEOUT_SECS: i64 = 2;
 pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
         Ok(files) => {
-            let mut sessions = Vec::new();
-            files.for_each(|file| {
-                if let Ok(file) = file {
-                    let file_name = file.file_name().into_string().unwrap();
-                    let ctime = std::fs::metadata(&file.path())
-                        .ok()
-                        .and_then(|f| f.created().ok())
-                        .and_then(|d| d.elapsed().ok())
-                        .unwrap_or_default();
-                    let duration = Duration::from_secs(ctime.as_secs());
-                    if file.file_type().unwrap().is_socket() && assert_socket(&file_name) {
-                        sessions.push((file_name, duration));
-                    }
-                }
+            // Collect all socket files first (fast, no blocking I/O)
+            let socket_files: Vec<_> = files
+                .filter_map(|f| f.ok())
+                .filter(|f| f.file_type().map(|t| t.is_socket()).unwrap_or(false))
+                .collect();
+
+            // Check all sessions in parallel using scoped threads.
+            // This ensures that even with multiple unresponsive sessions,
+            // the total time is bounded by the timeout (not timeout * num_sessions).
+            let sessions = std::thread::scope(|s| {
+                let handles: Vec<_> = socket_files
+                    .iter()
+                    .filter_map(|file| {
+                        // Skip files with non-UTF8 names
+                        let file_name = file.file_name().into_string().ok()?;
+                        let file_path = file.path();
+                        Some(s.spawn(move || {
+                            let ctime = std::fs::metadata(&file_path)
+                                .ok()
+                                .and_then(|f| f.created().ok())
+                                .and_then(|d| d.elapsed().ok())
+                                .unwrap_or_default();
+                            let duration = Duration::from_secs(ctime.as_secs());
+
+                            if assert_socket(&file_name) {
+                                Some((file_name, duration))
+                            } else {
+                                None
+                            }
+                        }))
+                    })
+                    .collect();
+
+                // Collect results from all threads
+                handles
+                    .into_iter()
+                    .filter_map(|h| h.join().ok().flatten())
+                    .collect::<Vec<_>>()
             });
+
             Ok(sessions)
         },
         Err(err) if io::ErrorKind::NotFound != err.kind() => Err(err.kind()),
@@ -758,6 +783,266 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "Timeout took too long: {:?}",
             elapsed
+        );
+    }
+
+    /// Test that parallel session checking is faster than sequential.
+    /// This verifies that multiple sockets are checked concurrently.
+    #[test]
+    fn test_parallel_socket_checking_is_faster_than_sequential() {
+        use std::io::{Read, Write};
+
+        const NUM_SOCKETS: usize = 3;
+        const DELAY_MS: u64 = 100;
+
+        // Create temporary directory with multiple sockets
+        let dir = tempdir().unwrap();
+        let mut listeners = Vec::new();
+        let mut socket_paths = Vec::new();
+
+        for i in 0..NUM_SOCKETS {
+            let socket_path = dir.path().join(format!("test_parallel_{}.sock", i));
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            socket_paths.push(socket_path);
+            listeners.push(listener);
+        }
+
+        // Flag to signal when test is done
+        let done = Arc::new(AtomicBool::new(false));
+
+        // Spawn threads that accept connections, delay, then send response
+        let handles: Vec<_> = listeners
+            .into_iter()
+            .map(|listener| {
+                let done_clone = done.clone();
+                thread::spawn(move || {
+                    if let Ok((mut conn, _addr)) = listener.accept() {
+                        // Simulate slow server - delay before responding
+                        thread::sleep(Duration::from_millis(DELAY_MS));
+                        // Send a response so client doesn't wait for timeout
+                        let _ = conn.write_all(b"OK");
+                        // Keep connection open until test is done
+                        while !done_clone.load(Ordering::Relaxed) {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Time how long it takes to check all sockets in parallel
+        let start = Instant::now();
+
+        std::thread::scope(|s| {
+            let check_handles: Vec<_> = socket_paths
+                .iter()
+                .map(|path| {
+                    s.spawn(|| {
+                        let stream = LocalSocketStream::connect(&**path).unwrap();
+                        let fd = stream.as_raw_fd();
+
+                        // Set a timeout longer than the delay
+                        let test_timeout = TimeVal::milliseconds(DELAY_MS as i64 * 5);
+                        setsockopt(fd, ReceiveTimeout, &test_timeout).unwrap();
+
+                        // Read response (server sends "OK" after DELAY_MS)
+                        let mut buf = [0u8; 2];
+                        let mut reader = std::io::BufReader::new(stream);
+                        let _ = reader.read_exact(&mut buf);
+                    })
+                })
+                .collect();
+
+            // Wait for all checks to complete
+            for h in check_handles {
+                let _ = h.join();
+            }
+        });
+
+        let elapsed = start.elapsed();
+
+        // Signal test is done
+        done.store(true, Ordering::Relaxed);
+        for h in handles {
+            let _ = h.join();
+        }
+
+        // If parallel: elapsed should be roughly DELAY_MS (all finish at same time)
+        // If sequential: elapsed would be roughly DELAY_MS * NUM_SOCKETS
+        // Use generous thresholds for CI stability
+        let parallel_upper_bound = Duration::from_millis(DELAY_MS * 2 + 100);
+        let sequential_lower_bound = Duration::from_millis(DELAY_MS * (NUM_SOCKETS as u64 - 1));
+
+        assert!(
+            elapsed < parallel_upper_bound,
+            "Parallel check took {:?}, expected less than {:?}. \
+             Threads may not be running in parallel.",
+            elapsed,
+            parallel_upper_bound
+        );
+        assert!(
+            elapsed < sequential_lower_bound,
+            "Parallel check took {:?}, which is close to sequential time ({:?}). \
+             Parallel execution should be significantly faster.",
+            elapsed,
+            sequential_lower_bound
+        );
+    }
+
+    /// Test that scoped threads correctly collect all results.
+    #[test]
+    fn test_scoped_threads_collect_all_results() {
+        const NUM_ITEMS: usize = 10;
+
+        // Use scoped threads to process items in parallel and collect results
+        let items: Vec<i32> = (0..NUM_ITEMS as i32).collect();
+
+        let results: Vec<i32> = std::thread::scope(|s| {
+            let handles: Vec<_> = items
+                .iter()
+                .map(|&item| {
+                    s.spawn(move || {
+                        // Simulate some work
+                        thread::sleep(Duration::from_millis(10));
+                        item * 2
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect()
+        });
+
+        // Verify all results were collected
+        assert_eq!(results.len(), NUM_ITEMS);
+
+        // Verify results are correct (order may vary due to parallel execution)
+        let mut sorted_results = results.clone();
+        sorted_results.sort();
+        let expected: Vec<i32> = (0..NUM_ITEMS as i32).map(|x| x * 2).collect();
+        assert_eq!(sorted_results, expected);
+    }
+
+    /// Test parallel checking with mixed responsive and unresponsive sockets.
+    #[test]
+    fn test_parallel_mixed_responsive_unresponsive() {
+        use std::io::{Read, Write};
+
+        const NUM_RESPONSIVE: usize = 2;
+        const NUM_UNRESPONSIVE: usize = 2;
+        const TIMEOUT_MS: i64 = 100;
+
+        let dir = tempdir().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+
+        // Create responsive sockets (immediately send data)
+        let mut responsive_handles = Vec::new();
+        let mut responsive_paths = Vec::new();
+        for i in 0..NUM_RESPONSIVE {
+            let path = dir.path().join(format!("responsive_{}.sock", i));
+            let listener = UnixListener::bind(&path).unwrap();
+            responsive_paths.push(path);
+
+            let done_clone = done.clone();
+            responsive_handles.push(thread::spawn(move || {
+                if let Ok((mut conn, _)) = listener.accept() {
+                    // Immediately send a response
+                    let _ = conn.write_all(b"OK");
+                    while !done_clone.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }));
+        }
+
+        // Create unresponsive sockets (never send data)
+        let mut unresponsive_handles = Vec::new();
+        let mut unresponsive_paths = Vec::new();
+        for i in 0..NUM_UNRESPONSIVE {
+            let path = dir.path().join(format!("unresponsive_{}.sock", i));
+            let listener = UnixListener::bind(&path).unwrap();
+            unresponsive_paths.push(path);
+
+            let done_clone = done.clone();
+            unresponsive_handles.push(thread::spawn(move || {
+                if let Ok((_conn, _)) = listener.accept() {
+                    // Never respond, just keep connection open
+                    while !done_clone.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }));
+        }
+
+        // Combine all paths
+        let all_paths: Vec<_> = responsive_paths
+            .into_iter()
+            .chain(unresponsive_paths.into_iter())
+            .collect();
+
+        let start = Instant::now();
+
+        // Check all sockets in parallel
+        let results: Vec<bool> = std::thread::scope(|s| {
+            let handles: Vec<_> = all_paths
+                .iter()
+                .map(|path| {
+                    s.spawn(|| {
+                        let stream = match LocalSocketStream::connect(&**path) {
+                            Ok(s) => s,
+                            Err(_) => return false,
+                        };
+                        let fd = stream.as_raw_fd();
+
+                        // Set timeout
+                        let timeout = TimeVal::milliseconds(TIMEOUT_MS);
+                        if setsockopt(fd, ReceiveTimeout, &timeout).is_err() {
+                            return false;
+                        }
+
+                        // Try to read
+                        let mut buf = [0u8; 2];
+                        let mut reader = std::io::BufReader::new(stream);
+                        reader.read_exact(&mut buf).is_ok()
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect()
+        });
+
+        let elapsed = start.elapsed();
+
+        // Clean up
+        done.store(true, Ordering::Relaxed);
+        for h in responsive_handles.into_iter().chain(unresponsive_handles) {
+            let _ = h.join();
+        }
+
+        // Verify we got results for all sockets
+        assert_eq!(results.len(), NUM_RESPONSIVE + NUM_UNRESPONSIVE);
+
+        // Count successes (responsive sockets)
+        let successes = results.iter().filter(|&&r| r).count();
+        assert_eq!(
+            successes, NUM_RESPONSIVE,
+            "Expected {} responsive sockets, got {}",
+            NUM_RESPONSIVE, successes
+        );
+
+        // Verify parallel execution - should complete in roughly timeout time
+        // (not timeout * num_unresponsive)
+        let max_expected = Duration::from_millis((TIMEOUT_MS as u64) * 2 + 100);
+        assert!(
+            elapsed < max_expected,
+            "Mixed check took {:?}, expected less than {:?}",
+            elapsed,
+            max_expected
         );
     }
 }
