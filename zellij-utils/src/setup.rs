@@ -621,22 +621,67 @@ impl Setup {
             },
         };
         let mut out = std::io::stdout();
-        clap_complete::generate(shell, &mut CliArgs::command(), "zellij", &mut out);
-        // add shell dependent extra completion
-        match shell {
-            Shell::Bash => {
-                let _ = out.write_all(BASH_EXTRA_COMPLETION);
-            },
-            Shell::Elvish => {},
-            Shell::Fish => {
-                let _ = out.write_all(FISH_EXTRA_COMPLETION);
-            },
-            Shell::PowerShell => {},
-            Shell::Zsh => {
-                let _ = out.write_all(ZSH_EXTRA_COMPLETION);
-            },
-            _ => {},
-        };
+
+        // For zsh, we need to post-process the completion to add dynamic session completion
+        if shell == Shell::Zsh {
+            let mut completion_buf = Vec::new();
+            clap_complete::generate(shell, &mut CliArgs::command(), "zellij", &mut completion_buf);
+
+            // Convert to string for processing
+            let completion_str = String::from_utf8_lossy(&completion_buf);
+
+            // Inject _zellij_sessions completer for session-related arguments
+            // These replacements add our custom completer function to the appropriate arguments
+            let completion_str = completion_str
+                // attach command: session-name argument
+                .replace(
+                    "'::session-name -- Name of the session to attach to:'",
+                    "'::session-name -- Name of the session to attach to:_zellij_sessions'",
+                )
+                // watch command: session-name argument
+                .replace(
+                    "'::session-name -- Name of the session to watch:'",
+                    "'::session-name -- Name of the session to watch:_zellij_sessions'",
+                )
+                // kill-session and delete-session commands: target-session argument
+                .replace(
+                    "'::target-session -- Name of target session:'",
+                    "'::target-session -- Name of target session:_zellij_sessions'",
+                )
+                // action switch-session command: name argument
+                .replace(
+                    "':name -- Name of the session to switch to:'",
+                    "':name -- Name of the session to switch to:_zellij_sessions'",
+                )
+                // Remove 'options' and 'help' subcommands from attach - we only want session names
+                .replace(
+                    "_zellij__attach_commands() {\n    local commands; commands=(\n'options:Change the behaviour of zellij' \\\n'help:Print this message or the help of the given subcommand(s)' \\\n    )\n    _describe -t commands 'zellij attach commands' commands \"$@\"\n}",
+                    "_zellij__attach_commands() {\n    local commands; commands=()\n    _describe -t commands 'zellij attach commands' commands \"$@\"\n}",
+                )
+                // Add alias support: clap_complete doesn't generate case entries for aliases,
+                // so we modify the case patterns to include both the full command and its alias
+                .replace("(attach)\n", "(attach|a)\n")
+                .replace("(watch)\n", "(watch|w)\n")
+                .replace("(kill-session)\n", "(kill-session|k)\n")
+                .replace("(delete-session)\n", "(delete-session|d)\n");
+
+            let _ = out.write_all(completion_str.as_bytes());
+            let _ = out.write_all(ZSH_EXTRA_COMPLETION);
+        } else {
+            clap_complete::generate(shell, &mut CliArgs::command(), "zellij", &mut out);
+            // add shell dependent extra completion
+            match shell {
+                Shell::Bash => {
+                    let _ = out.write_all(BASH_EXTRA_COMPLETION);
+                },
+                Shell::Elvish => {},
+                Shell::Fish => {
+                    let _ = out.write_all(FISH_EXTRA_COMPLETION);
+                },
+                Shell::PowerShell => {},
+                _ => {},
+            };
+        }
     }
 
     fn generate_auto_start(shell: &str) {
