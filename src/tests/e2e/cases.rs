@@ -2898,3 +2898,124 @@ pub fn override_layout_from_default_to_compact() {
     let last_snapshot = account_for_races_in_snapshot(last_snapshot);
     assert_snapshot!(last_snapshot);
 }
+
+#[test]
+#[ignore]
+pub fn test_scrollback_counter_accuracy() {
+    // Test that scrollback counter displays correct value with wrapped lines
+    let fake_win_size = Size {
+        cols: 120,
+        rows: 24,
+    };
+    let config_file_name = "scrollback_limit_100.kdl";
+    let mut test_attempts = 10;
+    let last_snapshot = loop {
+        RemoteRunner::kill_running_sessions(fake_win_size);
+        let mut runner = RemoteRunner::new_with_config(fake_win_size, config_file_name)
+            .add_step(Step {
+                name: "Load test fixture to fill scrollback",
+                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.status_bar_appears()
+                        && remote_terminal.cursor_position_is(3, 2)
+                    {
+                        remote_terminal.load_fixture("e2e/scrollback_limit_test");
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
+            })
+            .add_step(Step {
+                name: "Scroll up inside pane",
+                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.status_bar_appears()
+                        && remote_terminal.snapshot_contains("line120")
+                    {
+                        remote_terminal.send_key(&SCROLL_MODE);
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+
+                        let mut scroll_attempts = 0;
+                        const MAX_SCROLL_ATTEMPTS: u32 = 20;
+
+                        while scroll_attempts < MAX_SCROLL_ATTEMPTS {
+                            remote_terminal.send_key(&SCROLL_PAGE_UP_IN_SCROLL_MODE);
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+
+                            let snapshot = remote_terminal.current_snapshot();
+                            if snapshot.contains("SCROLL:  100/100") {
+                                break;
+                            }
+
+                            scroll_attempts += 1;
+                        }
+
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
+            });
+        runner.run_all_steps();
+        let last_snapshot = runner.take_snapshot_after(Step {
+            name: "Wait for scroll to finish",
+            instruction: |remote_terminal: RemoteTerminal| -> bool {
+                let mut step_is_complete = false;
+                let snapshot = remote_terminal.current_snapshot();
+                if remote_terminal.snapshot_contains("SCROLL:") {
+                    if remote_terminal.snapshot_contains("SCROLL:  100/100") {
+                        step_is_complete = true;
+                    } else if snapshot.contains("SCROLL:") && !snapshot.contains("SCROLL:  0/100") {
+                        step_is_complete = true;
+                    }
+                }
+                step_is_complete
+            },
+        });
+        if runner.test_timed_out && test_attempts > 0 {
+            test_attempts -= 1;
+            continue;
+        } else {
+            break last_snapshot;
+        }
+    };
+    let last_snapshot = account_for_races_in_snapshot(last_snapshot);
+
+    // Verify scroll mode is active and showing the counter
+    assert!(
+        last_snapshot.contains("SCROLL:"),
+        "Expected SCROLL: counter in snapshot but not found. Snapshot: {}",
+        last_snapshot
+    );
+
+    // Verify the scrollback limit is exactly 100 lines (not 121)
+    assert!(
+        last_snapshot.contains("/100"),
+        "Expected scrollback limit of 100 lines but not found. Snapshot: {}",
+        last_snapshot
+    );
+
+    // Verify we reached the top of scrollback (100/100)
+    assert!(
+        last_snapshot.contains("SCROLL:  100/100"),
+        "Expected to reach top of scrollback (SCROLL:  100/100) but got: {}",
+        last_snapshot
+            .lines()
+            .find(|l| l.contains("SCROLL:"))
+            .unwrap_or("SCROLL counter not found")
+    );
+
+    // At the top, line1 should NOT be visible (it was dropped due to scrollback limit)
+    // line2 should be the first line in the scrollback buffer
+    assert!(
+        !last_snapshot.contains("line1:"),
+        "line1 should be dropped from buffer when scrollback limit is exceeded"
+    );
+
+    // Verify that line2 or line22 is visible (depending on viewport position)
+    assert!(
+        last_snapshot.contains("line2") || last_snapshot.contains("line22"),
+        "line2 or line22 should be visible at top of scrollback buffer"
+    );
+
+    assert_snapshot!(last_snapshot);
+}
