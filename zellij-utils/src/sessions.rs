@@ -9,17 +9,16 @@ use crate::{
 };
 use anyhow;
 use humantime::format_duration;
-use nix::sys::socket::{setsockopt, sockopt::ReceiveTimeout};
-use nix::sys::time::{TimeVal, TimeValLike};
-use std::os::unix::io::RawFd;
 use std::collections::HashMap;
-use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::io::{AsFd, AsRawFd, RawFd};
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
 use suggest::Suggest;
 
 /// Timeout in seconds for socket reads when checking session connectivity.
 /// This prevents `zellij ls` from hanging indefinitely on unresponsive sessions.
+#[cfg(unix)]
 const SOCKET_ASSERT_TIMEOUT_SECS: i64 = 2;
 
 /// Get the PID of the peer process connected to a Unix socket.
@@ -60,7 +59,7 @@ fn get_peer_pid(fd: RawFd) -> Option<u32> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn get_peer_pid(_fd: RawFd) -> Option<u32> {
     // PID retrieval not supported on this platform
     None
@@ -69,7 +68,7 @@ fn get_peer_pid(_fd: RawFd) -> Option<u32> {
 pub fn get_sessions() -> Result<Vec<(String, Duration, Option<u32>)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
         Ok(files) => {
-// Collect all socket files first (fast, no blocking I/O)
+            // Collect all socket files first (fast, no blocking I/O)
             let socket_files: Vec<_> = files
                 .filter_map(|f| f.ok())
                 .filter(|f| is_ipc_socket(&f.file_type().unwrap_or_else(|_| unreachable!())))
@@ -224,23 +223,24 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 #[cfg(unix)]
 fn assert_socket(name: &str) -> (bool, Option<u32>) {
     use crate::consts::ipc_connect;
+    use interprocess::local_socket::traits::Stream as StreamTrait;
     let path = &*ZELLIJ_SOCK_DIR.join(name);
     match ipc_connect(path) {
         Ok(stream) => {
             // Set read timeout to prevent blocking forever on unresponsive sessions.
             // This is critical for `zellij ls` to not hang when a session is stuck.
-            let fd = stream.as_raw_fd();
-            let timeout = TimeVal::seconds(SOCKET_ASSERT_TIMEOUT_SECS);
-            if let Err(e) = setsockopt(fd, ReceiveTimeout, &timeout) {
-                log::warn!(
-                    "Failed to set socket timeout for session '{}': {}",
-                    name,
-                    e
-                );
+            let timeout_duration = Duration::from_secs(SOCKET_ASSERT_TIMEOUT_SECS as u64);
+            if let Err(e) = stream.set_recv_timeout(Some(timeout_duration)) {
+                log::warn!("Failed to set socket timeout for session '{}': {}", name, e);
             }
 
-            // Get the server's PID from the socket connection
-            let pid = get_peer_pid(fd);
+            // Get the server's PID from the socket connection.
+            // Extract the raw fd from the interprocess Stream enum.
+            let pid = match &stream {
+                interprocess::local_socket::Stream::UdSocket(s) => {
+                    get_peer_pid(s.as_fd().as_raw_fd())
+                },
+            };
 
             let mut sender: IpcSenderWithContext<ClientToServerMsg> =
                 IpcSenderWithContext::new(stream);
@@ -301,8 +301,8 @@ fn assert_socket(name: &str) -> (bool, Option<u32>) {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn assert_socket(_name: &str) -> bool {
-    true
+fn assert_socket(_name: &str) -> (bool, Option<u32>) {
+    (true, None)
 }
 
 pub fn print_sessions(
@@ -476,9 +476,13 @@ pub fn delete_session(name: &str, force: bool) {
 }
 
 pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool, progressive: bool) {
+    #[cfg(unix)]
     if progressive {
         list_sessions_progressive(no_formatting);
-    } else {
+    }
+    #[cfg(not(unix))]
+    let _ = progressive; // progressive mode is unix-only
+    if !progressive {
         let exit_code = match get_sessions() {
             Ok(running_sessions) => {
                 let resurrectable_sessions = get_resurrectable_sessions();
@@ -520,8 +524,10 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool, progressiv
 
 /// List sessions progressively, showing each session's status as it's checked.
 /// This is useful for debugging when some sessions may be unresponsive.
+#[cfg(unix)]
 fn list_sessions_progressive(no_formatting: bool) {
     use std::io::Write;
+    use std::os::unix::fs::FileTypeExt;
 
     let curr_session = envs::get_session_name().unwrap_or_else(|_| "".into());
 
@@ -964,11 +970,12 @@ const NOUNS: &[&'static str] = &[
     "zebra",
 ];
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use nix::sys::socket::{getsockopt, sockopt::ReceiveTimeout};
-    use std::os::unix::net::UnixListener;
+    use nix::sys::socket::{getsockopt, setsockopt, sockopt::ReceiveTimeout};
+    use nix::sys::time::{TimeVal, TimeValLike};
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
@@ -1001,7 +1008,7 @@ mod tests {
         let _listener = UnixListener::bind(&socket_path).unwrap();
 
         // Connect to the socket
-        let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+        let stream = UnixStream::connect(&*socket_path).unwrap();
         let fd = stream.as_raw_fd();
 
         // Set the timeout
@@ -1039,7 +1046,7 @@ mod tests {
         });
 
         // Connect and set timeout
-        let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+        let stream = UnixStream::connect(&*socket_path).unwrap();
         let fd = stream.as_raw_fd();
 
         // Set a short timeout for the test (100ms)
@@ -1129,7 +1136,7 @@ mod tests {
                 .iter()
                 .map(|path| {
                     s.spawn(|| {
-                        let stream = LocalSocketStream::connect(&**path).unwrap();
+                        let stream = UnixStream::connect(&**path).unwrap();
                         let fd = stream.as_raw_fd();
 
                         // Set a timeout longer than the delay
@@ -1200,10 +1207,7 @@ mod tests {
                 })
                 .collect();
 
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok())
-                .collect()
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
         });
 
         // Verify all results were collected
@@ -1281,7 +1285,7 @@ mod tests {
                 .iter()
                 .map(|path| {
                     s.spawn(|| {
-                        let stream = match LocalSocketStream::connect(&**path) {
+                        let stream = match UnixStream::connect(&**path) {
                             Ok(s) => s,
                             Err(_) => return false,
                         };
@@ -1301,10 +1305,7 @@ mod tests {
                 })
                 .collect();
 
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok())
-                .collect()
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
         });
 
         let elapsed = start.elapsed();
@@ -1437,7 +1438,7 @@ mod tests {
 
         for socket_name in &socket_names {
             let socket_path = dir.path().join(socket_name);
-            let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+            let stream = UnixStream::connect(&*socket_path).unwrap();
             let fd = stream.as_raw_fd();
 
             let timeout = TimeVal::milliseconds((DELAY_MS as i64) * 3);
@@ -1569,7 +1570,7 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         // Connect and get peer PID
-        let stream = LocalSocketStream::connect(&*socket_path).unwrap();
+        let stream = UnixStream::connect(&*socket_path).unwrap();
         let fd = stream.as_raw_fd();
         let pid = super::get_peer_pid(fd);
 
