@@ -1090,8 +1090,8 @@ mod tests {
     fn test_parallel_socket_checking_is_faster_than_sequential() {
         use std::io::{Read, Write};
 
-        const NUM_SOCKETS: usize = 3;
-        const DELAY_MS: u64 = 100;
+        const NUM_SOCKETS: usize = 4;
+        const DELAY_MS: u64 = 200;
 
         // Create temporary directory with multiple sockets
         let dir = tempdir().unwrap();
