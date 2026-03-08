@@ -558,7 +558,12 @@ impl Setup {
         // For zsh, we need to post-process the completion to add dynamic session completion
         if shell == Shell::Zsh {
             let mut completion_buf = Vec::new();
-            clap_complete::generate(shell, &mut CliArgs::command(), "zellij", &mut completion_buf);
+            clap_complete::generate(
+                shell,
+                &mut CliArgs::command(),
+                "zellij",
+                &mut completion_buf,
+            );
 
             // Convert to string for processing
             let completion_str = String::from_utf8_lossy(&completion_buf);
