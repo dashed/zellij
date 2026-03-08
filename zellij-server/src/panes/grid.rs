@@ -265,6 +265,14 @@ fn transfer_rows_from_viewport_to_lines_above(
         if !next_line.is_canonical {
             let mut bottom_canonical_row_and_wraps_in_dst =
                 get_lines_above_bottom_canonical_row_and_wraps(lines_above);
+            // Subtract display lines for rows being removed from lines_above
+            // before they are re-merged and pushed back via bounded_push
+            for removed_row in &bottom_canonical_row_and_wraps_in_dst {
+                let removed_display_lines =
+                    calculate_row_display_height(removed_row.width(), max_viewport_width);
+                *scrollback_display_lines =
+                    scrollback_display_lines.saturating_sub(removed_display_lines);
+            }
             next_lines.append(&mut bottom_canonical_row_and_wraps_in_dst);
         }
         next_lines.push(next_line);
@@ -1010,10 +1018,20 @@ impl Grid {
         self.cursor.get_shape()
     }
     pub fn scrollback_position_and_length(&self) -> (usize, usize) {
-        // (position, length) - return display lines for user-visible counter
+        // (position, length) — recalculate display lines from lines_above for accuracy
+        // This gives the true display line count, accounting for row merging that
+        // happens when non-canonical rows are transferred to lines_above
         let position = self.lines_below.len();
-        let total = self.scrollback_display_lines;
-        (position, total)
+        let mut display_lines_above: usize = 0;
+        for row in &self.lines_above {
+            let row_width = row.width();
+            if row_width > self.width {
+                display_lines_above += calculate_row_display_height(row_width, self.width);
+            } else {
+                display_lines_above += 1;
+            }
+        }
+        (position, display_lines_above + position)
     }
 
     fn update_scrollback_counts(&mut self) {
@@ -1168,6 +1186,13 @@ impl Grid {
             } else {
                 match self.lines_above.pop_back() {
                     Some(mut last_line_above) => {
+                        // Subtract display lines for the row being removed from lines_above
+                        // before it is re-merged and pushed back via bounded_push
+                        let removed_display_lines =
+                            calculate_row_display_height(last_line_above.width(), self.width);
+                        self.scrollback_display_lines = self
+                            .scrollback_display_lines
+                            .saturating_sub(removed_display_lines);
                         last_line_above.append(&mut line_to_push_up.columns);
                         last_line_above
                     },
