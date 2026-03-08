@@ -479,14 +479,14 @@ pub(crate) fn subscribe_to_session(
                         "Session '{}' not found. The following sessions are active:",
                         session_name
                     );
-                    list_sessions(false, false, true);
+                    list_sessions(false, false, true, false);
                     std::process::exit(1);
                 }
             } else if let Ok(session_name) = envs::get_session_name() {
                 session_name
             } else {
                 eprintln!("Please specify the session name to subscribe to. The following sessions are active:");
-                list_sessions(false, false, true);
+                list_sessions(false, false, true, false);
                 std::process::exit(1);
             }
         },
