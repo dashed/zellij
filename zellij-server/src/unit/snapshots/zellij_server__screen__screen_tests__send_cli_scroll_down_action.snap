@@ -2,7 +2,7 @@
 source: zellij-server/src/./unit/screen_tests.rs
 expression: "format!(\"{}\", last_snapshot)"
 ---
-00 (C): ┌ Pane #1 ────────────── SCROLL:  2/13 ┐┌ Pane #2 ─────────────────────────────┐
+00 (C): ┌ Pane #1 ────────────── SCROLL:  2/17 ┐┌ Pane #2 ─────────────────────────────┐
 01 (C): │fill pane up with something 11        ││                                      │
 02 (C): │fill pane up with something 12        ││                                      │
 03 (C): │fill pane up with something 13        ││                                      │
@@ -12,3 +12,4 @@ expression: "format!(\"{}\", last_snapshot)"
 07 (C): │fill pane up with something 17        ││                                      │
 08 (C): │fill pane up with something 18        ││                                      │
 09 (C): └──────────────────────────────────────┘└──────────────────────────────────────┘
+

@@ -5704,6 +5704,7 @@ fn test_line_wrapping_display_count() {
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
     let mut grid = Grid::new(
         VIEWPORT_HEIGHT,
@@ -5717,6 +5718,7 @@ fn test_line_wrapping_display_count() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     );
 
@@ -5795,6 +5797,7 @@ fn test_massive_line_wrapping_calculation() {
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
     let mut grid = Grid::new(
         VIEWPORT_HEIGHT,
@@ -5808,6 +5811,7 @@ fn test_massive_line_wrapping_calculation() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     );
 
@@ -5874,16 +5878,17 @@ fn test_massive_line_wrapping_calculation() {
 fn test_scrollback_limit_enforcement_many_lines() {
     // Test scrollback limit enforcement when adding many wrapped lines
     // Verifies that the scrollback system properly enforces limits when approaching maximum capacity
-    
+
     const VIEWPORT_HEIGHT: usize = 10;
     const VIEWPORT_WIDTH: usize = 10;
     const DEFAULT_SCROLLBACK_LIMIT: usize = 10000;
-    
+
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
     let mut grid = Grid::new(
         VIEWPORT_HEIGHT,
@@ -5897,6 +5902,7 @@ fn test_scrollback_limit_enforcement_many_lines() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     );
 
@@ -5911,7 +5917,7 @@ fn test_scrollback_limit_enforcement_many_lines() {
             }
         }};
     }
-    
+
     // Helper macro to reset grid state
     macro_rules! reset_grid {
         () => {{
@@ -5953,7 +5959,7 @@ fn test_scrollback_limit_enforcement_many_lines() {
     }
 
     let (_pos, scrollback_near_limit) = grid.scrollback_position_and_length();
-    
+
     // Test that scrollback limit is enforced when adding many wrapped lines
     // Total theoretical: 100 lines × 100 display lines = 10,000 display lines
     // Should stay at or below the configured limit
@@ -5963,7 +5969,7 @@ fn test_scrollback_limit_enforcement_many_lines() {
         DEFAULT_SCROLLBACK_LIMIT,
         scrollback_near_limit
     );
-    
+
     // Additional verification: we should be close to the limit
     // With 100×1000-char lines, we expect to approach the 10,000 limit
     assert!(
@@ -5992,6 +5998,7 @@ fn test_very_long_lines_scrollback_limit() {
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
     let mut grid = Grid::new(
         VIEWPORT_HEIGHT,
@@ -6005,6 +6012,7 @@ fn test_very_long_lines_scrollback_limit() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     );
 
@@ -6192,6 +6200,7 @@ fn test_scrollback_limit_enforcement_with_scrolling() {
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
 
     let mut grid = Grid::new(
@@ -6206,6 +6215,7 @@ fn test_scrollback_limit_enforcement_with_scrolling() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     );
 
@@ -6265,6 +6275,7 @@ fn test_mixed_wrapped_and_normal_lines() {
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
 
     let mut grid = Grid::new(
@@ -6279,6 +6290,7 @@ fn test_mixed_wrapped_and_normal_lines() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     );
 
@@ -6474,6 +6486,7 @@ fn test_dynamic_resize_updates_display_count() {
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
 
     let mut grid = Grid::new(
@@ -6488,6 +6501,7 @@ fn test_dynamic_resize_updates_display_count() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     );
 
@@ -6722,4 +6736,3 @@ fn test_dynamic_resize_updates_display_count() {
         "Narrowing should increase display lines"
     );
 }
-
