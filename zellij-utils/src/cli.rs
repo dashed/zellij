@@ -35,7 +35,7 @@ fn validate_session(name: &str) -> Result<String, String> {
 }
 
 #[derive(Parser, Default, Debug, Clone, Serialize, Deserialize)]
-#[clap(version, name = "zellij")]
+#[clap(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), name = "zellij")]
 pub struct CliArgs {
     /// Maximum panes on screen, caution: opening more panes will close old ones
     #[clap(long, value_parser)]
