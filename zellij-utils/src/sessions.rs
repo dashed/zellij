@@ -13,7 +13,7 @@ use anyhow;
 use humantime::format_duration;
 use std::collections::{BTreeMap, HashMap};
 #[cfg(unix)]
-use std::os::unix::io::{AsFd, AsRawFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
@@ -99,15 +99,15 @@ fn session_name(names_by_id: &HashMap<String, String>, id: String) -> String {
 /// Get the PID of the peer process connected to a Unix socket.
 /// Uses platform-specific socket options: SO_PEERCRED on Linux, LOCAL_PEERPID on macOS.
 #[cfg(target_os = "linux")]
-fn get_peer_pid(fd: RawFd) -> Option<u32> {
+fn get_peer_pid(fd: BorrowedFd<'_>) -> Option<u32> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-    getsockopt(fd, PeerCredentials)
+    getsockopt(&fd, PeerCredentials)
         .ok()
         .map(|creds| creds.pid() as u32)
 }
 
 #[cfg(target_os = "macos")]
-fn get_peer_pid(fd: RawFd) -> Option<u32> {
+fn get_peer_pid(fd: BorrowedFd<'_>) -> Option<u32> {
     // macOS uses LOCAL_PEERPID to get the peer's PID
     use nix::libc;
     use std::mem;
@@ -119,7 +119,7 @@ fn get_peer_pid(fd: RawFd) -> Option<u32> {
 
     let result = unsafe {
         libc::getsockopt(
-            fd,
+            fd.as_raw_fd(),
             SOL_LOCAL,
             LOCAL_PEERPID,
             &mut pid as *mut _ as *mut libc::c_void,
@@ -135,7 +135,7 @@ fn get_peer_pid(fd: RawFd) -> Option<u32> {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn get_peer_pid(_fd: RawFd) -> Option<u32> {
+fn get_peer_pid(_fd: BorrowedFd<'_>) -> Option<u32> {
     // PID retrieval not supported on this platform
     None
 }
@@ -335,9 +335,7 @@ fn assert_socket(name: &str) -> (bool, Option<u32>) {
             // Get the server's PID from the socket connection.
             // Extract the raw fd from the interprocess Stream enum.
             let pid = match &stream {
-                interprocess::local_socket::Stream::UdSocket(s) => {
-                    get_peer_pid(s.as_fd().as_raw_fd())
-                },
+                interprocess::local_socket::Stream::UdSocket(s) => get_peer_pid(s.as_fd()),
             };
 
             let mut sender: IpcSenderWithContext<ClientToServerMsg> =
@@ -1373,11 +1371,11 @@ mod tests {
                 .map(|path| {
                     s.spawn(|| {
                         let stream = UnixStream::connect(&**path).unwrap();
-                        let fd = stream.as_raw_fd();
+                        let fd = stream.as_fd();
 
                         // Set a timeout longer than the delay
                         let test_timeout = TimeVal::milliseconds(DELAY_MS as i64 * 5);
-                        setsockopt(fd, ReceiveTimeout, &test_timeout).unwrap();
+                        setsockopt(&fd, ReceiveTimeout, &test_timeout).unwrap();
 
                         // Read response (server sends "OK" after DELAY_MS)
                         let mut buf = [0u8; 2];
@@ -1525,11 +1523,11 @@ mod tests {
                             Ok(s) => s,
                             Err(_) => return false,
                         };
-                        let fd = stream.as_raw_fd();
+                        let fd = stream.as_fd();
 
                         // Set timeout
                         let timeout = TimeVal::milliseconds(TIMEOUT_MS);
-                        if setsockopt(fd, ReceiveTimeout, &timeout).is_err() {
+                        if setsockopt(&fd, ReceiveTimeout, &timeout).is_err() {
                             return false;
                         }
 
@@ -1675,10 +1673,10 @@ mod tests {
         for socket_name in &socket_names {
             let socket_path = dir.path().join(socket_name);
             let stream = UnixStream::connect(&*socket_path).unwrap();
-            let fd = stream.as_raw_fd();
+            let fd = stream.as_fd();
 
             let timeout = TimeVal::milliseconds((DELAY_MS as i64) * 3);
-            setsockopt(fd, ReceiveTimeout, &timeout).unwrap();
+            setsockopt(&fd, ReceiveTimeout, &timeout).unwrap();
 
             let mut buf = [0u8; 2];
             let mut reader = std::io::BufReader::new(stream);
@@ -1807,7 +1805,7 @@ mod tests {
 
         // Connect and get peer PID
         let stream = UnixStream::connect(&*socket_path).unwrap();
-        let fd = stream.as_raw_fd();
+        let fd = stream.as_fd();
         let pid = super::get_peer_pid(fd);
 
         // On supported platforms (Linux, macOS), PID should be Some

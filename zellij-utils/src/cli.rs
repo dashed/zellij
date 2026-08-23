@@ -879,7 +879,7 @@ pub enum Sessions {
         reverse: bool,
 
         /// Check each session and show status progressively (useful for debugging hangs)
-        #[clap(short, long, value_parser, takes_value(false), default_value("false"))]
+        #[clap(short, long)]
         progressive: bool,
     },
     /// List existing plugin aliases
