@@ -773,28 +773,28 @@ impl Setup {
             let completion_str = completion_str
                 // attach command: session-name argument
                 .replace(
-                    "'::session-name -- Name of the session to attach to:'",
-                    "'::session-name -- Name of the session to attach to:_zellij_sessions'",
+                    "'::session_name -- Name of the session to attach to:_default'",
+                    "'::session_name -- Name of the session to attach to:_zellij_sessions'",
                 )
                 // watch command: session-name argument
                 .replace(
-                    "'::session-name -- Name of the session to watch:'",
-                    "'::session-name -- Name of the session to watch:_zellij_sessions'",
+                    "'::session_name -- Name of the session to watch:_default'",
+                    "'::session_name -- Name of the session to watch:_zellij_sessions'",
                 )
                 // kill-session and delete-session commands: target-session argument
                 .replace(
-                    "'::target-session -- Name of target session:'",
-                    "'::target-session -- Name of target session:_zellij_sessions'",
+                    "'::target_session -- Name of target session:_default'",
+                    "'::target_session -- Name of target session:_zellij_sessions'",
                 )
                 // action switch-session command: name argument
                 .replace(
-                    "':name -- Name of the session to switch to:'",
+                    "':name -- Name of the session to switch to:_default'",
                     "':name -- Name of the session to switch to:_zellij_sessions'",
                 )
                 // Remove 'options' and 'help' subcommands from attach - we only want session names
                 .replace(
-                    "_zellij__attach_commands() {\n    local commands; commands=(\n'options:Change the behaviour of zellij' \\\n'help:Print this message or the help of the given subcommand(s)' \\\n    )\n    _describe -t commands 'zellij attach commands' commands \"$@\"\n}",
-                    "_zellij__attach_commands() {\n    local commands; commands=()\n    _describe -t commands 'zellij attach commands' commands \"$@\"\n}",
+                    "_zellij__subcmd__attach_commands() {\n    local commands; commands=(\n'options:Change the behaviour of zellij' \\\n'help:Print this message or the help of the given subcommand(s)' \\\n    )\n    _describe -t commands 'zellij attach commands' commands \"$@\"\n}",
+                    "_zellij__subcmd__attach_commands() {\n    local commands; commands=()\n    _describe -t commands 'zellij attach commands' commands \"$@\"\n}",
                 )
                 // Add alias support: clap_complete doesn't generate case entries for aliases,
                 // so we modify the case patterns to include both the full command and its alias
