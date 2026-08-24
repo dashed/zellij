@@ -9171,6 +9171,7 @@ fn test_line_wrapping_display_count() {
         Rc::new(RefCell::new(LinkHandler::new())),
         Rc::new(RefCell::new(None)),
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         Style::default(),
         debug,
         arrow_fonts,
@@ -9185,9 +9186,7 @@ fn test_line_wrapping_display_count() {
     macro_rules! add_line {
         ($content:expr) => {{
             let line_content = format!("{}\n", $content);
-            for byte in line_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, line_content.as_bytes());
         }};
     }
 
@@ -9205,9 +9204,7 @@ fn test_line_wrapping_display_count() {
                 reset_content.push_str("RESET");
             }
             // Process as single stream for precise control
-            for byte in reset_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, reset_content.as_bytes());
             // Return the new baseline scrollback position
             let (_pos, baseline) = grid.scrollback_position_and_length();
             baseline
@@ -9222,9 +9219,7 @@ fn test_line_wrapping_display_count() {
     // Using explicit control for precise behavior
     let line_100_chars = "a".repeat(100);
     // Don't add newline - just send the content directly
-    for byte in line_100_chars.as_bytes() {
-        vte_parser.advance(&mut grid, *byte);
-    }
+    vte_parser.advance(&mut grid, line_100_chars.as_bytes());
 
     let (_pos, scrollback_after_100) = grid.scrollback_position_and_length();
     let increase = scrollback_after_100 - baseline_scrollback;
@@ -9264,6 +9259,7 @@ fn test_massive_line_wrapping_calculation() {
         Rc::new(RefCell::new(LinkHandler::new())),
         Rc::new(RefCell::new(None)),
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         Style::default(),
         debug,
         arrow_fonts,
@@ -9278,9 +9274,7 @@ fn test_massive_line_wrapping_calculation() {
     macro_rules! add_line {
         ($content:expr) => {{
             let line_content = format!("{}\n", $content);
-            for byte in line_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, line_content.as_bytes());
         }};
     }
 
@@ -9298,9 +9292,7 @@ fn test_massive_line_wrapping_calculation() {
                 reset_content.push_str("RESET");
             }
             // Process as single stream for precise control
-            for byte in reset_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, reset_content.as_bytes());
             // Return the new baseline scrollback position
             let (_pos, baseline) = grid.scrollback_position_and_length();
             baseline
@@ -9313,9 +9305,7 @@ fn test_massive_line_wrapping_calculation() {
     // Add the 10,000 character line
     // Using explicit control without automatic newline
     let huge_line = "W".repeat(10000);
-    for byte in huge_line.as_bytes() {
-        vte_parser.advance(&mut grid, *byte);
-    }
+    vte_parser.advance(&mut grid, huge_line.as_bytes());
 
     let (_pos, scrollback_after_huge) = grid.scrollback_position_and_length();
 
@@ -9354,6 +9344,7 @@ fn test_scrollback_limit_enforcement_many_lines() {
         Rc::new(RefCell::new(LinkHandler::new())),
         Rc::new(RefCell::new(None)),
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         Style::default(),
         debug,
         arrow_fonts,
@@ -9368,9 +9359,7 @@ fn test_scrollback_limit_enforcement_many_lines() {
     macro_rules! add_line {
         ($content:expr) => {{
             let line_content = format!("{}\n", $content);
-            for byte in line_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, line_content.as_bytes());
         }};
     }
 
@@ -9388,9 +9377,7 @@ fn test_scrollback_limit_enforcement_many_lines() {
                 reset_content.push_str("RESET");
             }
             // Process as single stream for precise control
-            for byte in reset_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, reset_content.as_bytes());
             // Return the new baseline scrollback position
             let (_pos, baseline) = grid.scrollback_position_and_length();
             baseline
@@ -9405,13 +9392,11 @@ fn test_scrollback_limit_enforcement_many_lines() {
     for i in 0..100 {
         if i > 0 {
             // Add CR/LF between lines
-            vte_parser.advance(&mut grid, b'\r');
-            vte_parser.advance(&mut grid, b'\n');
+            vte_parser.advance(&mut grid, b"\r");
+            vte_parser.advance(&mut grid, b"\n");
         }
         let long_line = "L".repeat(1000); // 1000 ÷ 10 = 100 display lines each
-        for byte in long_line.as_bytes() {
-            vte_parser.advance(&mut grid, *byte);
-        }
+        vte_parser.advance(&mut grid, long_line.as_bytes());
     }
 
     let (_pos, scrollback_near_limit) = grid.scrollback_position_and_length();
@@ -9464,6 +9449,7 @@ fn test_very_long_lines_scrollback_limit() {
         Rc::new(RefCell::new(LinkHandler::new())),
         Rc::new(RefCell::new(None)),
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         Style::default(),
         debug,
         arrow_fonts,
@@ -9478,9 +9464,7 @@ fn test_very_long_lines_scrollback_limit() {
     macro_rules! add_line {
         ($content:expr) => {{
             let line_content = format!("{}\n", $content);
-            for byte in line_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, line_content.as_bytes());
         }};
     }
 
@@ -9515,9 +9499,7 @@ fn test_very_long_lines_scrollback_limit() {
         all_content.push_str(&format!("Test{:02}", i));
     }
     // Process as single stream
-    for byte in all_content.as_bytes() {
-        vte_parser.advance(&mut grid, *byte);
-    }
+    vte_parser.advance(&mut grid, all_content.as_bytes());
 
     let (_pos, scrollback_after_test_lines) = grid.scrollback_position_and_length();
     let added_to_scrollback = scrollback_after_test_lines - baseline_scrollback;
@@ -9541,9 +9523,7 @@ fn test_very_long_lines_scrollback_limit() {
     // Add a line that exceeds the entire scrollback limit
     // Using explicit control without automatic newline
     let massive_line = "M".repeat(100000); // 100,000 ÷ 10 = 10,000 display lines
-    for byte in massive_line.as_bytes() {
-        vte_parser.advance(&mut grid, *byte);
-    }
+    vte_parser.advance(&mut grid, massive_line.as_bytes());
 
     let (_pos, scrollback_after_massive) = grid.scrollback_position_and_length();
 
@@ -9566,9 +9546,7 @@ fn test_very_long_lines_scrollback_limit() {
     // Add a 500-char line when already at limit
     // Using explicit control without automatic newline
     let final_line = "F".repeat(500); // 500 ÷ 10 = 50 display lines
-    for byte in final_line.as_bytes() {
-        vte_parser.advance(&mut grid, *byte);
-    }
+    vte_parser.advance(&mut grid, final_line.as_bytes());
 
     let (_pos, final_scrollback) = grid.scrollback_position_and_length();
 
@@ -9599,9 +9577,7 @@ fn test_very_long_lines_scrollback_limit() {
         singles_content.push('.');
     }
     // Process as single stream
-    for byte in singles_content.as_bytes() {
-        vte_parser.advance(&mut grid, *byte);
-    }
+    vte_parser.advance(&mut grid, singles_content.as_bytes());
 
     let (_pos, scrollback_after_singles) = grid.scrollback_position_and_length();
     let singles_change = scrollback_after_singles as i32 - before_singles as i32;
@@ -9669,6 +9645,7 @@ fn test_scrollback_limit_enforcement_with_scrolling() {
         Rc::new(RefCell::new(LinkHandler::new())),
         Rc::new(RefCell::new(None)),
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         Style::default(),
         debug,
         arrow_fonts,
@@ -9684,9 +9661,7 @@ fn test_scrollback_limit_enforcement_with_scrolling() {
     for _i in 0..1000 {
         // Push way more lines than scrollback should hold
         let line_content = format!("{}\n", "x".repeat(20));
-        for byte in line_content.as_bytes() {
-            vte_parser.advance(&mut grid, *byte);
-        }
+        vte_parser.advance(&mut grid, line_content.as_bytes());
     }
 
     let (_position, length) = grid.scrollback_position_and_length();
@@ -9703,9 +9678,7 @@ fn test_scrollback_limit_enforcement_with_scrolling() {
     // Also test with very long lines
     for _i in 0..100 {
         let line_content = format!("{}\n", "x".repeat(2000)); // ~200 display lines each
-        for byte in line_content.as_bytes() {
-            vte_parser.advance(&mut grid, *byte);
-        }
+        vte_parser.advance(&mut grid, line_content.as_bytes());
     }
 
     let (_position, length) = grid.scrollback_position_and_length();
@@ -9744,6 +9717,7 @@ fn test_mixed_wrapped_and_normal_lines() {
         Rc::new(RefCell::new(LinkHandler::new())),
         Rc::new(RefCell::new(None)),
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         Style::default(),
         debug,
         arrow_fonts,
@@ -9758,9 +9732,7 @@ fn test_mixed_wrapped_and_normal_lines() {
     macro_rules! add_line {
         ($content:expr) => {{
             let line_content = format!("{}\n", $content);
-            for byte in line_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, line_content.as_bytes());
         }};
     }
 
@@ -9956,6 +9928,7 @@ fn test_dynamic_resize_updates_display_count() {
         Rc::new(RefCell::new(LinkHandler::new())),
         Rc::new(RefCell::new(None)),
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         Style::default(),
         debug,
         arrow_fonts,
@@ -9970,9 +9943,7 @@ fn test_dynamic_resize_updates_display_count() {
     macro_rules! add_line {
         ($content:expr) => {{
             let line_content = format!("{}\n", $content);
-            for byte in line_content.as_bytes() {
-                vte_parser.advance(&mut grid, *byte);
-            }
+            vte_parser.advance(&mut grid, line_content.as_bytes());
         }};
     }
 
