@@ -36,7 +36,7 @@ fn validate_session(name: &str) -> Result<String, String> {
 
 #[derive(Parser, Default, Debug, Clone, Serialize, Deserialize)]
 #[clap(
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"),
     name = "zellij",
     about = "A terminal workspace with batteries included",
     styles = CLI_STYLES,
@@ -877,6 +877,10 @@ pub enum Sessions {
         /// List the sessions in reverse order (default is ascending order)
         #[clap(short, long)]
         reverse: bool,
+
+        /// Check each session and show status progressively (useful for debugging hangs)
+        #[clap(short, long)]
+        progressive: bool,
     },
     /// List existing plugin aliases
     #[clap(visible_alias = "la")]

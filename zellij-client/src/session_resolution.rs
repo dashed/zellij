@@ -30,12 +30,12 @@ pub enum SessionListing {
 impl SessionListing {
     pub fn print(&self) {
         match self {
-            SessionListing::Active => zellij_utils::sessions::list_sessions(false, false, true),
+            SessionListing::Active => zellij_utils::sessions::list_sessions(false, false, true, false),
             SessionListing::Indexed(sessions) => print_sessions_with_index(sessions.clone()),
             SessionListing::Named(sessions) => print_sessions(
                 sessions
                     .iter()
-                    .map(|name| (name.clone(), Duration::default(), false))
+                    .map(|name| (name.clone(), Duration::default(), false, None))
                     .collect(),
                 false,
                 false,
@@ -49,7 +49,7 @@ impl SessionListing {
             SessionListing::Active => zellij_utils::sessions::get_sessions()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(name, _)| name)
+                .map(|(name, _, _)| name)
                 .collect(),
             SessionListing::Indexed(sessions) | SessionListing::Named(sessions) => sessions.clone(),
         }

@@ -252,6 +252,7 @@ fn handle_openpty(
                     panic!("failed to set controlling terminal");
                 }
                 close_fds::close_open_fds(3, &[]);
+                crate::fd_limit::restore_for_child();
                 Ok(())
             })
             .spawn()
