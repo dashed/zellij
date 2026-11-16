@@ -1,4 +1,6 @@
 #[cfg(not(windows))]
+mod fd_limit;
+#[cfg(not(windows))]
 #[path = "os_input_output_unix.rs"]
 mod os_input_output_unix;
 #[cfg(windows)]
@@ -3297,6 +3299,7 @@ pub fn start_server(os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             .umask(current_umask.bits() as u32)
             .start()
             .expect("could not daemonize the server process");
+        fd_limit::raise();
     }
 
     #[cfg(windows)]
