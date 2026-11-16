@@ -50,7 +50,7 @@ fn the_app_panel_shows_the_inbox_and_going_to_an_item_switches_the_client() {
     let listed: Vec<String> = zellij_utils::sessions::get_sessions()
         .unwrap()
         .into_iter()
-        .map(|(name, _)| name)
+        .map(|(name, _, _)| name)
         .collect();
     assert!(
         !listed.iter().any(|name| name == APP_PANEL_SESSION),
